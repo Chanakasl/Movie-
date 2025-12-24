@@ -1,18 +1,16 @@
 import mongoose from "mongoose";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const MONGODB_URI = process.env.MONGODB_URI;
 const CHANNEL_ID = process.env.CHANNEL_ID;
+const MONGODB_URI = process.env.MONGODB_URI;
 
-let isConnected = false;
-
-async function connectDB() {
-  if (isConnected) return;
+// Mongo connect
+if (!mongoose.connection.readyState) {
   await mongoose.connect(MONGODB_URI);
-  isConnected = true;
 }
 
-const MovieSchema = new mongoose.Schema({
+// Schema
+const movieSchema = new mongoose.Schema({
   file_id: String,
   file_name: String,
   file_size: Number,
@@ -20,52 +18,70 @@ const MovieSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
-const Movie =
-  mongoose.models.Movie || mongoose.model("Movie", MovieSchema);
+const Movie = mongoose.models.Movie || mongoose.model("Movie", movieSchema);
 
 export default async function handler(req, res) {
-  // ✅ Handle GET safely (prevents 500)
-  if (req.method === "GET") {
-    return res.status(200).json({ status: "Bot is alive" });
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).end();
-  }
-
   try {
-    await connectDB();
-
     const update = req.body;
-    if (!update.message) {
-      return res.status(200).end();
-    }
 
-    const msg = update.message;
+    // ✅ CHANNEL POST HANDLER (IMPORTANT)
+    if (update.channel_post) {
+      const post = update.channel_post;
 
-    // 🎬 Video
-    if (msg.video && msg.chat.id.toString() === CHANNEL_ID) {
+      if (String(post.chat.id) !== CHANNEL_ID) {
+        return res.status(200).send("Ignored");
+      }
+
+      const file =
+        post.video ||
+        post.document;
+
+      if (!file) {
+        return res.status(200).send("No file");
+      }
+
       await Movie.create({
-        file_id: msg.video.file_id,
-        file_name: msg.video.file_name || "video",
-        file_size: msg.video.file_size,
-        mime_type: msg.video.mime_type
+        file_id: file.file_id,
+        file_name: file.file_name || "video",
+        file_size: file.file_size,
+        mime_type: file.mime_type
       });
+
+      return res.status(200).send("Saved");
     }
 
-    // 📁 Document (movie as file)
-    if (msg.document && msg.chat.id.toString() === CHANNEL_ID) {
-      await Movie.create({
-        file_id: msg.document.file_id,
-        file_name: msg.document.file_name,
-        file_size: msg.document.file_size,
-        mime_type: msg.document.mime_type
-      });
+    // ✅ USER MESSAGE HANDLER
+    if (update.message) {
+      const msg = update.message;
+
+      if (msg.text === "/movie") {
+        const latest = await Movie.findOne().sort({ createdAt: -1 });
+
+        if (!latest) {
+          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: msg.chat.id,
+              text: "❌ No movies found"
+            })
+          });
+        } else {
+          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendVideo`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: msg.chat.id,
+              video: latest.file_id
+            })
+          });
+        }
+      }
     }
 
-    return res.status(200).end();
+    res.status(200).send("OK");
   } catch (err) {
-    console.error("BOT ERROR:", err);
-    return res.status(500).end();
+    console.error(err);
+    res.status(500).send("Error");
   }
 }
